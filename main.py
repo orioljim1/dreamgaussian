@@ -18,6 +18,9 @@ from mesh import Mesh, safe_normalize
 from PIL import Image
 from mg import get_depth
 
+
+from depth_utils  import *
+
 class GUI:
     def __init__(self, opt):
         self.opt = opt  # shared with the trainer's opt to support in-place modification of rendering parameters.
@@ -57,6 +60,8 @@ class GUI:
         #depth
         self.model_zoe = None
         self.source_depth = None
+        self.original_depth = None
+        self.canny_mask = None
 
         # input text
         self.prompt = ""
@@ -230,6 +235,22 @@ class GUI:
                 loss = loss + 1000 * (step_ratio if self.opt.warmup_rgb_loss else 1) * F.mse_loss(mask, self.input_mask_torch)
 
                 #here we should compute depth loss
+
+                ### depth supervised loss
+                depth = out["depth"]
+                usedepth = False
+                if usedepth and self.original_depth is not None:
+                    depth_mask = (self.original_depth>0) # render_pkg["acc"][0]
+                    gt_maskeddepth = (self.original_depth * depth_mask).cuda()
+                    deploss = l1_loss(gt_maskeddepth, depth*depth_mask) * 0.5
+                    loss = loss + deploss
+
+                ## depth regularization loss (canny)
+                usedepthReg = False
+                if usedepthReg and self.step>=0: 
+                    depth_mask = (depth>0).detach()
+                    nearDepthMean_map = nearMean_map(depth, self.canny_mask*depth_mask, kernelsize=3)
+                    loss = loss + l2_loss(nearDepthMean_map, depth*depth_mask) * 1.0
 
             ### novel view (manual batch)
             render_resolution = 128 if step_ratio < 0.3 else (256 if step_ratio < 0.6 else 512)
@@ -460,10 +481,14 @@ class GUI:
        
         img = img.astype(np.float32) / 255.0
         self.predict_depth_Marigold(img)
+
         
         self.input_mask = img[..., 3:]
         # white bg
         self.input_img = img[..., :3] * self.input_mask + (1 - self.input_mask)
+
+        self.canny_mask = image2canny(self.input_img.permute(1,2,0), 50, 150, isEdge1=False).detach().to(self.data_device)
+
         print("[Info] we're reaching img save point")
         #save_img = (self.input_img * 255).astype(np.uint8)
         #cv2.imwrite("./test_export.png", save_img)
