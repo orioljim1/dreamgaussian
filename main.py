@@ -15,6 +15,8 @@ from gs_renderer import Renderer, MiniCam
 
 from grid_put import mipmap_linear_grid_put_2d
 from mesh import Mesh, safe_normalize
+from PIL import Image
+from mg import get_depth
 
 class GUI:
     def __init__(self, opt):
@@ -52,6 +54,10 @@ class GUI:
         self.overlay_input_img = False
         self.overlay_input_img_ratio = 0.5
 
+        #depth
+        self.model_zoe = None
+        self.source_depth = None
+
         # input text
         self.prompt = ""
         self.negative_prompt = ""
@@ -64,7 +70,7 @@ class GUI:
         
         # load input data from cmdline
         if self.opt.input is not None:
-            self.load_input(self.opt.input)
+            self.load_input(self.opt.input) #load image here.
         
         # override prompt from cmdline
         if self.opt.prompt is not None:
@@ -104,6 +110,8 @@ class GUI:
         self.last_seed = seed
 
     def prepare_train(self):
+        
+        print(f"[INFO] Prepare_train ")
 
         self.step = 0
 
@@ -129,8 +137,17 @@ class GUI:
             self.cam.far,
         )
 
+        print("pre self.input_img", self.input_img)
+
+        print("pre self.enable_sd", self.enable_sd)
+        print("pre self.enable_zero123", self.enable_zero123)
+
         self.enable_sd = self.opt.lambda_sd > 0 and self.prompt != ""
         self.enable_zero123 = self.opt.lambda_zero123 > 0 and self.input_img is not None
+        print("pos self.input_img", self.input_img)
+        print("pos self.enable_sd", self.enable_sd)
+        print("pos self.enable_zero123", self.enable_zero123)
+        self.enable_zero123 = False #to deactivate sds
 
         # lazy load guidance model
         if self.guidance_sd is None and self.enable_sd:
@@ -151,6 +168,8 @@ class GUI:
                 print(f"[INFO] loaded SD!")
 
         if self.guidance_zero123 is None and self.enable_zero123:
+            print(f"[INFO] self.enable_zero123", self.enable_zero123)
+            print(f"[INFO] self.opt.stable_zero123", self.opt.stable_zero123)
             print(f"[INFO] loading zero123...")
             from guidance.zero123_utils import Zero123
             if self.opt.stable_zero123:
@@ -167,6 +186,8 @@ class GUI:
             self.input_mask_torch = torch.from_numpy(self.input_mask).permute(2, 0, 1).unsqueeze(0).to(self.device)
             self.input_mask_torch = F.interpolate(self.input_mask_torch, (self.opt.ref_size, self.opt.ref_size), mode="bilinear", align_corners=False)
 
+            
+
         # prepare embeddings
         with torch.no_grad():
 
@@ -177,6 +198,7 @@ class GUI:
                     self.guidance_sd.get_text_embeds([self.prompt], [self.negative_prompt])
 
             if self.enable_zero123:
+                print("reaching self.enable_zero123", self.enable_zero123)
                 self.guidance_zero123.get_img_embeds(self.input_img_torch)
 
     def train_step(self):
@@ -206,6 +228,8 @@ class GUI:
                 # mask loss
                 mask = out["alpha"].unsqueeze(0) # [1, 1, H, W] in [0, 1]
                 loss = loss + 1000 * (step_ratio if self.opt.warmup_rgb_loss else 1) * F.mse_loss(mask, self.input_mask_torch)
+
+                #here we should compute depth loss
 
             ### novel view (manual batch)
             render_resolution = 128 if step_ratio < 0.3 else (256 if step_ratio < 0.6 else 512)
@@ -267,6 +291,7 @@ class GUI:
                     loss = loss + self.opt.lambda_sd * self.guidance_sd.train_step(images, step_ratio=step_ratio if self.opt.anneal_timestep else None)
 
             if self.enable_zero123:
+                
                 loss = loss + self.opt.lambda_zero123 * self.guidance_zero123.train_step(images, vers, hors, radii, step_ratio=step_ratio if self.opt.anneal_timestep else None, default_elevation=self.opt.elevation)
             
             # optimize step
@@ -375,6 +400,51 @@ class GUI:
                 "_texture", self.buffer_image
             )  # buffer must be contiguous, else seg fault!
 
+
+
+    def predict_depth_Zoe(self, img):
+        from ZoeDepth.zoedepth.utils.misc import colorize
+
+        #depth estimation 
+        if self.model_zoe is None:
+            self.model_zoe = torch.hub.load("./ZoeDepth", "ZoeD_NK", source="local", pretrained=True).to('cuda')
+        
+        self.source_depth = self.model_zoe.infer_pil(img)
+        # Colorize output
+        print("[Info] Coloring depth")
+        colored = colorize(self.source_depth)
+
+        # save colored output
+        fpath_colored = "./test_path/test_colored2.png"
+        Image.fromarray(colored).save(fpath_colored)
+
+    def predict_depth_Marigold(self, img):
+        rgb_path = "./data/charmander_rgba.png"
+
+        depth_pred, depth_colored = get_depth(img)
+        # Save as npy
+        output_dir = "./test_path/output/new"
+        rgb_name_base = os.path.splitext(os.path.basename(rgb_path))[0]
+        pred_name_base = rgb_name_base + "_pred"
+        # Output directories
+        output_dir_color = os.path.join(output_dir, "depth_colored")
+        output_dir_tif = os.path.join(output_dir, "depth_bw")
+        output_dir_npy = os.path.join(output_dir, "depth_npy")
+        os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(output_dir_color, exist_ok=True)
+        os.makedirs(output_dir_tif, exist_ok=True)
+        os.makedirs(output_dir_npy, exist_ok=True)
+        # Save as 16-bit uint png
+        depth_to_save = (depth_pred * 65535.0).astype(np.uint16)
+        png_save_path = os.path.join(output_dir_tif, f"{pred_name_base}.png")
+
+        Image.fromarray(depth_to_save).save(png_save_path, mode="I;16")
+
+        # Colorize
+        colored_save_path = os.path.join(
+            output_dir_color, f"{pred_name_base}_colored.png"
+        )
+        depth_colored.save(colored_save_path)
     
     def load_input(self, file):
         # load image
@@ -386,13 +456,26 @@ class GUI:
             img = rembg.remove(img, session=self.bg_remover)
 
         img = cv2.resize(img, (self.W, self.H), interpolation=cv2.INTER_AREA)
+        cv2.imwrite("./test_export33.png", img)
+       
         img = img.astype(np.float32) / 255.0
-
+        self.predict_depth_Marigold(img)
+        
         self.input_mask = img[..., 3:]
         # white bg
         self.input_img = img[..., :3] * self.input_mask + (1 - self.input_mask)
+        print("[Info] we're reaching img save point")
+        #save_img = (self.input_img * 255).astype(np.uint8)
+        #cv2.imwrite("./test_export.png", save_img)
+        #self.predict_depth_Zoe(self.input_img)
         # bgr to rgb
         self.input_img = self.input_img[..., ::-1].copy()
+        
+
+
+        # Save the processed image
+        # Ensure image is converted back to 8-bit per channel for saving
+        
 
         # load prompt
         file_prompt = file.replace("_rgba.png", "_caption.txt")

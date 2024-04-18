@@ -98,6 +98,9 @@ class GUI:
 
     def prepare_train(self):
 
+
+        print(f"[INFO] Prepare_train 2S ")
+
         self.step = 0
 
         # setup training
