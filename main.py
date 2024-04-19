@@ -59,9 +59,10 @@ class GUI:
 
         #depth
         self.model_zoe = None
-        self.source_depth = None
         self.original_depth = None
         self.canny_mask = None
+        self.input_og_depth_torch = None
+        self.input_image_rgba = None
 
         # input text
         self.prompt = ""
@@ -152,7 +153,7 @@ class GUI:
         print("pos self.input_img", self.input_img)
         print("pos self.enable_sd", self.enable_sd)
         print("pos self.enable_zero123", self.enable_zero123)
-        self.enable_zero123 = False #to deactivate sds
+        #self.enable_zero123 = False #to deactivate sds
 
         # lazy load guidance model
         if self.guidance_sd is None and self.enable_sd:
@@ -190,8 +191,6 @@ class GUI:
 
             self.input_mask_torch = torch.from_numpy(self.input_mask).permute(2, 0, 1).unsqueeze(0).to(self.device)
             self.input_mask_torch = F.interpolate(self.input_mask_torch, (self.opt.ref_size, self.opt.ref_size), mode="bilinear", align_corners=False)
-
-            
 
         # prepare embeddings
         with torch.no_grad():
@@ -234,16 +233,28 @@ class GUI:
                 mask = out["alpha"].unsqueeze(0) # [1, 1, H, W] in [0, 1]
                 loss = loss + 1000 * (step_ratio if self.opt.warmup_rgb_loss else 1) * F.mse_loss(mask, self.input_mask_torch)
 
+                #depth loss
+                depth = out["depth"].unsqueeze(0)
+                dloss =  1000 * (step_ratio if self.opt.warmup_rgb_loss else 1) * F.mse_loss(depth, self.input_og_depth_torch)
+                print(f"dloss {dloss.item():.4f}")
                 #here we should compute depth loss
 
                 ### depth supervised loss
-                depth = out["depth"]
+                
                 usedepth = False
-                if usedepth and self.original_depth is not None:
-                    depth_mask = (self.original_depth>0) # render_pkg["acc"][0]
-                    gt_maskeddepth = (self.original_depth * depth_mask).cuda()
-                    deploss = l1_loss(gt_maskeddepth, depth*depth_mask) * 0.5
-                    loss = loss + deploss
+                if usedepth and self.input_og_depth_torch is not None:
+                    #depth_mask = (self.original_depth) # render_pkg["acc"][0]
+                    #og_depth = torch.from_numpy(self.input_og_depth_torch).cuda()
+                    depth_mask = (self.input_og_depth_torch>0) # render_pkg["acc"][0]
+
+
+                    gt_maskeddepth = (self.input_og_depth_torch * depth_mask)
+                    #gt_maskeddepth = torch.from_numpy(gt_maskeddepth).cuda()
+                    deploss = l1_loss(gt_maskeddepth, depth*depth_mask) * 0.5 #0.5 is lambda
+                    #print("[INFO] the computed dept loss is: ", deploss)
+                    #print(f"[INFO] Depth loss = {deploss.item():.4f}")
+
+                    #loss = loss + deploss
 
                 ## depth regularization loss (canny)
                 usedepthReg = False
@@ -430,7 +441,11 @@ class GUI:
         if self.model_zoe is None:
             self.model_zoe = torch.hub.load("./ZoeDepth", "ZoeD_NK", source="local", pretrained=True).to('cuda')
         
-        self.source_depth = self.model_zoe.infer_pil(img)
+        depth_pred =  self.model_zoe.infer_pil(img)
+        clean_img = clean_background(self.input_image_rgba, depth_pred)
+        cv2.imwrite("./clean_image.png", clean_img)
+        return depth_pred
+        ''' 
         # Colorize output
         print("[Info] Coloring depth")
         colored = colorize(self.source_depth)
@@ -438,11 +453,14 @@ class GUI:
         # save colored output
         fpath_colored = "./test_path/test_colored2.png"
         Image.fromarray(colored).save(fpath_colored)
+        '''
 
     def predict_depth_Marigold(self, img):
         rgb_path = "./data/charmander_rgba.png"
 
         depth_pred, depth_colored = get_depth(img)
+        return depth_pred
+        '''
         # Save as npy
         output_dir = "./test_path/output/new"
         rgb_name_base = os.path.splitext(os.path.basename(rgb_path))[0]
@@ -466,6 +484,7 @@ class GUI:
             output_dir_color, f"{pred_name_base}_colored.png"
         )
         depth_colored.save(colored_save_path)
+        '''
     
     def load_input(self, file):
         # load image
@@ -477,26 +496,30 @@ class GUI:
             img = rembg.remove(img, session=self.bg_remover)
 
         img = cv2.resize(img, (self.W, self.H), interpolation=cv2.INTER_AREA)
-        cv2.imwrite("./test_export33.png", img)
+        #cv2.imwrite("./test_export33.png", img)
        
         img = img.astype(np.float32) / 255.0
-        self.predict_depth_Marigold(img)
-
+        #depth_marigold = self.predict_depth_Marigold(img)
+        self.input_image_rgba = img.copy()
         
         self.input_mask = img[..., 3:]
         # white bg
         self.input_img = img[..., :3] * self.input_mask + (1 - self.input_mask)
 
-        self.canny_mask = image2canny(self.input_img.permute(1,2,0), 50, 150, isEdge1=False).detach().to(self.data_device)
+        #self.canny_mask = image2canny(self.input_img.permute(1,2,0), 50, 150, isEdge1=False).detach().to(self.data_device)
 
         print("[Info] we're reaching img save point")
         #save_img = (self.input_img * 255).astype(np.uint8)
         #cv2.imwrite("./test_export.png", save_img)
-        #self.predict_depth_Zoe(self.input_img)
+        depth_zoe = self.predict_depth_Zoe(self.input_img)
+        
         # bgr to rgb
         self.input_img = self.input_img[..., ::-1].copy()
         
-
+        #depht used 
+        self.original_depth = depth_zoe
+        self.input_og_depth_torch = torch.from_numpy(depth_zoe).unsqueeze(0).unsqueeze(0).to(self.device)
+        self.input_og_depth_torch = F.interpolate(self.input_og_depth_torch, (self.opt.ref_size, self.opt.ref_size), mode="bilinear", align_corners=False)
 
         # Save the processed image
         # Ensure image is converted back to 8-bit per channel for saving
