@@ -19,3 +19,5 @@ videos*
 images*
 *.mp4
 /test_path
+/metrics_data
+/saved_renders

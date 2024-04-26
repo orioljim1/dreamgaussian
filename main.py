@@ -17,7 +17,7 @@ from grid_put import mipmap_linear_grid_put_2d
 from mesh import Mesh, safe_normalize
 from PIL import Image
 from mg import get_depth
-
+import json
 
 from depth_utils  import *
 
@@ -63,6 +63,9 @@ class GUI:
         self.canny_mask = None
         self.input_og_depth_torch = None
         self.input_image_rgba = None
+        self.losses_data = {"rgb": [], "alpha": [], "depth": []}
+
+        self.saved_cameras = load_camera_poses("./camera_poses")
 
         # input text
         self.prompt = ""
@@ -227,16 +230,29 @@ class GUI:
 
                 # rgb loss
                 image = out["image"].unsqueeze(0) # [1, 3, H, W] in [0, 1]
-                loss = loss + 10000 * (step_ratio if self.opt.warmup_rgb_loss else 1) * F.mse_loss(image, self.input_img_torch)
+                rgb_loss = 10000 * (step_ratio if self.opt.warmup_rgb_loss else 1) * F.mse_loss(image, self.input_img_torch)
+                loss = loss + rgb_loss#+ 10000 * (step_ratio if self.opt.warmup_rgb_loss else 1) * F.mse_loss(image, self.input_img_torch)
+                self.losses_data["rgb"].append(f"{rgb_loss.item():.4f}")
 
                 # mask loss
                 mask = out["alpha"].unsqueeze(0) # [1, 1, H, W] in [0, 1]
-                loss = loss + 1000 * (step_ratio if self.opt.warmup_rgb_loss else 1) * F.mse_loss(mask, self.input_mask_torch)
+                alpha_loss = 1000 * (step_ratio if self.opt.warmup_rgb_loss else 1) * F.mse_loss(mask, self.input_mask_torch)
+                loss = loss + alpha_loss #1000 * (step_ratio if self.opt.warmup_rgb_loss else 1) * F.mse_loss(mask, self.input_mask_torch)
+                self.losses_data["alpha"].append(f"{alpha_loss.item():.4f}")
+                
+                dloss ={ "item":0.0}
+                if(self.step > 1):
+                    #depth loss
+                    depth = out["depth"].unsqueeze(0)
+                    dloss =  1000 * (step_ratio if self.opt.warmup_rgb_loss else 1) * F.mse_loss(depth, self.input_og_depth_torch)
+                    #loss = loss + dloss
+                    self.losses_data["depth"].append(f"{dloss.item():.4f}")
+                else:
+                    self.losses_data["depth"].append(0.0)
 
-                #depth loss
-                depth = out["depth"].unsqueeze(0)
-                dloss =  1000 * (step_ratio if self.opt.warmup_rgb_loss else 1) * F.mse_loss(depth, self.input_og_depth_torch)
-                print(f"dloss {dloss.item():.4f}")
+                
+
+                #print(f"dloss {dloss.item():.4f}")
                 #here we should compute depth loss
 
                 ### depth supervised loss
@@ -434,6 +450,55 @@ class GUI:
 
 
 
+    def render_img(self, camera_values):
+        cur_cam = MiniCam(
+            np.array(camera_values['pose'], dtype= np.float32),
+            self.W,
+            self.H,
+            np.float64(camera_values['fovy']),
+            np.float64(camera_values["fovx"]),
+            np.float64(camera_values["near"]),
+            np.float64(camera_values["far"]),
+        )
+
+        out = self.renderer.render(cur_cam, self.gaussain_scale_factor)
+
+        buffer_image = out[self.mode]  # [3, H, W]
+
+        if self.mode in ['depth', 'alpha']:
+            buffer_image = buffer_image.repeat(3, 1, 1)
+            if self.mode == 'depth':
+                buffer_image = (buffer_image - buffer_image.min()) / (buffer_image.max() - buffer_image.min() + 1e-20)
+
+        buffer_image = F.interpolate(
+            buffer_image.unsqueeze(0),
+            size=(self.H, self.W),
+            mode="bilinear",
+            align_corners=False,
+        ).squeeze(0)
+
+        buffer_image = (
+            buffer_image.permute(1, 2, 0)
+            .contiguous()
+            .clamp(0, 1)
+            .contiguous()
+            .detach()
+            .cpu()
+            .numpy()
+        )
+        return buffer_image
+    
+
+    def render_multiple_images(self):
+        
+        for cam_pose in self.saved_cameras:
+            img = self.render_img(cam_pose)
+            files = os.listdir("./saved_renders")
+            next_number = len(files) + 1
+            img = (img * 255).astype(np.uint8)
+            img = img[..., ::-1].copy() #bgr to rgb
+            cv2.imwrite(f'./saved_renders/camera_pose{next_number}.png', img)
+
     def predict_depth_Zoe(self, img):
         from ZoeDepth.zoedepth.utils.misc import colorize
 
@@ -442,9 +507,11 @@ class GUI:
             self.model_zoe = torch.hub.load("./ZoeDepth", "ZoeD_NK", source="local", pretrained=True).to('cuda')
         
         depth_pred =  self.model_zoe.infer_pil(img)
+        #depth_pred = (depth_pred * 255).astype(np.uint8)
+        #depth_pred = depth_pred[..., ::-1].copy() #bgr to rgb
         clean_img = clean_background(self.input_image_rgba, depth_pred)
         cv2.imwrite("./clean_image.png", clean_img)
-        return depth_pred
+        return clean_img
         ''' 
         # Colorize output
         print("[Info] Coloring depth")
@@ -862,10 +929,13 @@ class GUI:
                         if self.training:
                             self.training = False
                             dpg.configure_item("_button_train", label="start")
+                            with open('./metrics_data/losses_data_v300.json', 'w') as f:
+                                json.dump(self.losses_data, f)
                         else:
                             self.prepare_train()
                             self.training = True
                             dpg.configure_item("_button_train", label="stop")
+                            
 
                     # dpg.add_button(
                     #     label="init", tag="_button_init", callback=self.prepare_train
@@ -920,6 +990,34 @@ class GUI:
                     format="%.2f",
                     default_value=self.gaussain_scale_factor,
                     callback=callback_set_gaussain_scale,
+                )
+            
+            
+            with dpg.collapsing_header(label="Camera stuff", default_open=True):
+                def callback_campera_pose(sender, app_data):
+                    camera_parameters = {
+                    "pose": self.cam.pose,
+
+                    "fovy":self.cam.fovy,
+                    "fovx":self.cam.fovx,
+                    "near":self.cam.near,
+                    "far": self.cam.far
+                    }
+
+                    def default_converter(o):
+                        if isinstance(o, np.ndarray):
+                            return o.tolist()
+                    print(camera_parameters)
+                    files = os.listdir("./camera_poses")
+                    next_number = len(files) + 1
+                    with open(f'./camera_poses/camera_pose{next_number}.json', 'w') as f:
+                        json.dump(camera_parameters, f, default=default_converter)
+                    
+                dpg.add_button(
+                        label="Save camera pose", tag="scp", callback=callback_campera_pose
+                    )
+                dpg.add_button(
+                        label="Render views!", tag="rvs", callback=self.render_multiple_images
                 )
 
         ### register camera handler

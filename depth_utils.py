@@ -5,6 +5,10 @@ from math import exp
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+import imageio
+import os
+import json
+
 
 def normalize_depth(depth):
     return (depth-depth.min())/(depth.max()-depth.min())
@@ -142,22 +146,53 @@ def export_depth_image(tensor, path, H, W):
     plt.imsave(path, buffer_image)
 
 
+
+def normalize_depth_map(depth_map):
+    min_val = np.min(depth_map)
+    max_val = np.max(depth_map)
+    contrast_enhanced_depth_map = (depth_map - min_val) / ((max_val *3) - min_val) * 255 
+    contrast_enhanced_depth_map = np.clip(contrast_enhanced_depth_map, 0, 255)   
+    return contrast_enhanced_depth_map.astype(np.uint8)
+
 def clean_background(rgba_image, rgb_image):
     
     height, width, _ = rgba_image.shape
-    cv2.imwrite("./rgba_image.png", rgba_image)
-    cv2.imwrite("./rgb_image_pre.png", rgb_image)
+
+
+    #rgb_image_corrected = (rgb_image * 255).astype(np.uint8)
+
+    #cv2.imwrite("./rgba_image_OGI.png", rgba_image_corrected)
+    #cv2.imwrite("./rgb_image_pre_DMM.png", rgb_image_corrected)
 
     # Iterate over all pixels
     for y in range(height):
         for x in range(width):
             r, g, b, a = rgba_image[y, x]  # Extract RGBA values
             # Set RGB to black if alpha is 0
-            print(a)
             if a == 0:
                 rgb_image[y, x] = 0 # Set RGB pixel to black
-    cv2.imwrite("./rgb_image_pos.png", rgb_image)
+    rgb_image_normalized = normalize_depth(rgb_image)
+    rgb_image_normalized = (rgb_image_normalized * 255).astype(np.uint8)
+
+
+    cv2.imwrite("./rgb_image_pos_FINALLL.png", rgb_image_normalized)
     return rgb_image     
+
+def save_img_32f(np_img):
+    img = (np_img * 255).astype(np.uint8)
+    imageio.imwrite('output_image.png', img)
+
+def load_camera_poses(directory):
+    json_files = [f for f in os.listdir(directory) if f.endswith('.json')]
+    data_list = []
+    for file in json_files:
+        with open(os.path.join(directory, file), 'r') as f:
+            data = json.load(f)
+            data_list.append(data)
+    return data_list
+
+
+
 
 '''
 ### depth supervised loss
