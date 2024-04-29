@@ -19,7 +19,7 @@ from PIL import Image
 from mg import get_depth
 import json
 
-from depth_utils  import *
+from depth_utils  import normalize_depth, l1_loss, l2_loss, nearMean_map, image2canny, optimize_depth, export_depth_image, normalize_depth_map, clean_background, save_tensor_as_png, save_tensor_as_png2, load_camera_poses
 
 class GUI:
     def __init__(self, opt):
@@ -192,6 +192,12 @@ class GUI:
             self.input_img_torch = torch.from_numpy(self.input_img).permute(2, 0, 1).unsqueeze(0).to(self.device)
             self.input_img_torch = F.interpolate(self.input_img_torch, (self.opt.ref_size, self.opt.ref_size), mode="bilinear", align_corners=False)
 
+            #we need tensor
+            self.canny_mask = self.input_img_torch.clamp(0.0, 1.0).to(self.device).squeeze()
+            self.canny_mask = image2canny(self.canny_mask.permute(1,2,0), 50, 150, isEdge1=True).detach().to(self.device)
+            print("we end up here", self.canny_mask.shape)
+            save_tensor_as_png(self.canny_mask, "./iter_canny.png")
+
             self.input_mask_torch = torch.from_numpy(self.input_mask).permute(2, 0, 1).unsqueeze(0).to(self.device)
             self.input_mask_torch = F.interpolate(self.input_mask_torch, (self.opt.ref_size, self.opt.ref_size), mode="bilinear", align_corners=False)
 
@@ -240,10 +246,10 @@ class GUI:
                 loss = loss + alpha_loss #1000 * (step_ratio if self.opt.warmup_rgb_loss else 1) * F.mse_loss(mask, self.input_mask_torch)
                 self.losses_data["alpha"].append(f"{alpha_loss.item():.4f}")
                 
+                depth = out["depth"].unsqueeze(0)
                 dloss ={ "item":0.0}
                 if(self.step > 1):
                     #depth loss
-                    depth = out["depth"].unsqueeze(0)
                     dloss =  1000 * (step_ratio if self.opt.warmup_rgb_loss else 1) * F.mse_loss(depth, self.input_og_depth_torch)
                     #loss = loss + dloss
                     self.losses_data["depth"].append(f"{dloss.item():.4f}")
@@ -273,11 +279,13 @@ class GUI:
                     #loss = loss + deploss
 
                 ## depth regularization loss (canny)
-                usedepthReg = False
+                usedepthReg = True
                 if usedepthReg and self.step>=0: 
                     depth_mask = (depth>0).detach()
-                    nearDepthMean_map = nearMean_map(depth, self.canny_mask*depth_mask, kernelsize=3)
-                    loss = loss + l2_loss(nearDepthMean_map, depth*depth_mask) * 1.0
+                    nearDepthMean_map = nearMean_map(depth.squeeze(), (self.canny_mask*depth_mask).squeeze(), kernelsize=3)
+                    canny_loss = l2_loss(nearDepthMean_map, depth*depth_mask) * 1.0
+                    #loss = loss + canny_loss #*1000
+
 
             ### novel view (manual batch)
             render_resolution = 128 if step_ratio < 0.3 else (256 if step_ratio < 0.6 else 512)
@@ -573,16 +581,24 @@ class GUI:
         # white bg
         self.input_img = img[..., :3] * self.input_mask + (1 - self.input_mask)
 
-        #self.canny_mask = image2canny(self.input_img.permute(1,2,0), 50, 150, isEdge1=False).detach().to(self.data_device)
 
         print("[Info] we're reaching img save point")
-        #save_img = (self.input_img * 255).astype(np.uint8)
-        #cv2.imwrite("./test_export.png", save_img)
         depth_zoe = self.predict_depth_Zoe(self.input_img)
         
         # bgr to rgb
         self.input_img = self.input_img[..., ::-1].copy()
-        
+
+        '''
+        ##########
+        self.input_img_torch = torch.from_numpy(self.input_img).permute(2, 0, 1).unsqueeze(0).to(self.device)
+        self.input_img_torch = F.interpolate(self.input_img_torch, (self.opt.ref_size, self.opt.ref_size), mode="bilinear", align_corners=False)
+
+        #we need tensor
+        self.canny_mask = self.input_img_torch.clamp(0.0, 1.0).to(self.device).squeeze().squeeze()
+        self.canny_mask = image2canny(self.canny_mask.permute(1,2,0), 50, 150, isEdge1=False).detach().to(self.device)
+        print("we end up here", self.canny_mask)
+        ###########
+        '''
         #depht used 
         self.original_depth = depth_zoe
         self.input_og_depth_torch = torch.from_numpy(depth_zoe).unsqueeze(0).unsqueeze(0).to(self.device)
