@@ -11,6 +11,13 @@ from diff_gaussian_rasterization import (
     GaussianRasterizationSettings,
     GaussianRasterizer,
 )
+
+import diff_gaussian_rasterization_depth_acc
+
+from depth_utils import normalize_depth, normalize_depth5
+from ZoeDepth.zoedepth.utils.misc import colorize
+
+
 from simple_knn._C import distCUDA2
 
 from sh_utils import eval_sh, SH2RGB, RGB2SH
@@ -758,6 +765,7 @@ class Renderer:
         )
 
         rasterizer = GaussianRasterizer(raster_settings=raster_settings)
+        rasterizer_2 = diff_gaussian_rasterization_depth_acc.GaussianRasterizer(raster_settings=raster_settings)
 
         means3D = self.gaussians.get_xyz
         means2D = screenspace_points
@@ -808,6 +816,20 @@ class Renderer:
             cov3D_precomp=cov3D_precomp,
         )
 
+        rendered_depth = normalize_depth5(rendered_depth.unsqueeze(0))
+
+        rendered_image_r2, depth_r2, acc_r2, radii_r2 = rasterizer_2(
+            means3D=means3D,
+            means2D=means2D,
+            shs=shs,
+            colors_precomp=colors_precomp,
+            opacities=opacity,
+            scales=scales,
+            rotations=rotations,
+            cov3D_precomp=cov3D_precomp,
+        )
+
+
         rendered_image = rendered_image.clamp(0, 1)
 
         # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
@@ -815,6 +837,7 @@ class Renderer:
         return {
             "image": rendered_image,
             "depth": rendered_depth,
+            "depth_2":depth_r2.unsqueeze(0),
             "alpha": rendered_alpha,
             "viewspace_points": screenspace_points,
             "visibility_filter": radii > 0,

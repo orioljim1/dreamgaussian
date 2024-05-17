@@ -18,8 +18,10 @@ from mesh import Mesh, safe_normalize
 from PIL import Image
 from mg import get_depth
 import json
+import sys
+import io
 
-from depth_utils  import normalize_depth, l1_loss, l2_loss, nearMean_map, image2canny, optimize_depth, export_depth_image, normalize_depth_map, clean_background, save_tensor_as_png, save_tensor_as_png2, load_camera_poses
+from depth_utils  import lpips, psnr, ssim, normalize_depth, normalize_depth5, l1_loss, l2_loss, nearMean_map, image2canny, optimize_depth, export_depth_image, normalize_depth_map, clean_background, save_tensor_as_png, save_tensor_as_png2, load_camera_poses
 
 class GUI:
     def __init__(self, opt):
@@ -30,7 +32,8 @@ class GUI:
         self.cam = OrbitCamera(opt.W, opt.H, r=opt.radius, fovy=opt.fovy)
 
         self.mode = "image"
-        self.seed = "random"
+        self.seed = "42"
+        self.seed_everything()
 
         self.buffer_image = np.ones((self.W, self.H, 3), dtype=np.float32)
         self.need_update = True  # update buffer_image
@@ -63,7 +66,8 @@ class GUI:
         self.canny_mask = None
         self.input_og_depth_torch = None
         self.input_image_rgba = None
-        self.losses_data = {"rgb": [], "alpha": [], "depth": []}
+        self.losses_data = {"rgb": [], "alpha": [], "depth": [], "canny":[]}
+        self.breakk = False
 
         self.saved_cameras = load_camera_poses("./camera_poses")
 
@@ -109,6 +113,7 @@ class GUI:
         except:
             seed = np.random.randint(0, 1000000)
 
+        print("We're seeding "*10)
         os.environ["PYTHONHASHSEED"] = str(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
@@ -146,16 +151,8 @@ class GUI:
             self.cam.far,
         )
 
-        print("pre self.input_img", self.input_img)
-
-        print("pre self.enable_sd", self.enable_sd)
-        print("pre self.enable_zero123", self.enable_zero123)
-
         self.enable_sd = self.opt.lambda_sd > 0 and self.prompt != ""
         self.enable_zero123 = self.opt.lambda_zero123 > 0 and self.input_img is not None
-        print("pos self.input_img", self.input_img)
-        print("pos self.enable_sd", self.enable_sd)
-        print("pos self.enable_zero123", self.enable_zero123)
         #self.enable_zero123 = False #to deactivate sds
 
         # lazy load guidance model
@@ -194,8 +191,7 @@ class GUI:
 
             #we need tensor
             self.canny_mask = self.input_img_torch.clamp(0.0, 1.0).to(self.device).squeeze()
-            self.canny_mask = image2canny(self.canny_mask.permute(1,2,0), 50, 150, isEdge1=True).detach().to(self.device)
-            print("we end up here", self.canny_mask.shape)
+            self.canny_mask = image2canny(self.canny_mask.permute(1,2,0), 50, 150, isEdge1=False).detach().to(self.device)
             save_tensor_as_png(self.canny_mask, "./iter_canny.png")
 
             self.input_mask_torch = torch.from_numpy(self.input_mask).permute(2, 0, 1).unsqueeze(0).to(self.device)
@@ -246,45 +242,40 @@ class GUI:
                 loss = loss + alpha_loss #1000 * (step_ratio if self.opt.warmup_rgb_loss else 1) * F.mse_loss(mask, self.input_mask_torch)
                 self.losses_data["alpha"].append(f"{alpha_loss.item():.4f}")
                 
-                depth = out["depth"].unsqueeze(0)
+                depth = out["depth"]#.unsqueeze(0)
+                #depth = normalize_depth(depth)
                 dloss ={ "item":0.0}
-                if(self.step > 1):
+                if(self.step >= 0 and self.opt.use_depth and False):
+                    #print("using depth!")
                     #depth loss
-                    dloss =  1000 * (step_ratio if self.opt.warmup_rgb_loss else 1) * F.mse_loss(depth, self.input_og_depth_torch)
+                    dloss =  self.opt.dloss_lambda * (step_ratio if self.opt.warmup_rgb_loss else 1) * F.mse_loss(depth, self.input_og_depth_torch)
                     #loss = loss + dloss
+                    #print("Dloss: ", f"{dloss.item():.4f}" )
                     self.losses_data["depth"].append(f"{dloss.item():.4f}")
                 else:
-                    self.losses_data["depth"].append(0.0)
-
-                
-
-                #print(f"dloss {dloss.item():.4f}")
-                #here we should compute depth loss
+                    if(self.step == 400):
+                        a = 2
+                    #self.losses_data["depth"].append(0.0)
 
                 ### depth supervised loss
                 
-                usedepth = False
+                usedepth = True
                 if usedepth and self.input_og_depth_torch is not None:
-                    #depth_mask = (self.original_depth) # render_pkg["acc"][0]
-                    #og_depth = torch.from_numpy(self.input_og_depth_torch).cuda()
-                    depth_mask = (self.input_og_depth_torch>0) # render_pkg["acc"][0]
-
-
+                    depth_mask = (self.input_og_depth_torch>0) 
                     gt_maskeddepth = (self.input_og_depth_torch * depth_mask)
-                    #gt_maskeddepth = torch.from_numpy(gt_maskeddepth).cuda()
-                    deploss = l1_loss(gt_maskeddepth, depth*depth_mask) * 0.5 #0.5 is lambda
-                    #print("[INFO] the computed dept loss is: ", deploss)
-                    #print(f"[INFO] Depth loss = {deploss.item():.4f}")
+                    deploss =  self.opt.dloss_lambda * l1_loss(gt_maskeddepth, depth*depth_mask)
+                    self.losses_data["depth"].append(f"{deploss.item():.4f}")
 
-                    #loss = loss + deploss
+                    loss = loss + deploss
 
                 ## depth regularization loss (canny)
-                usedepthReg = True
-                if usedepthReg and self.step>=0: 
+                usedepthReg = False
+                if usedepthReg and self.step>=0 and self.opt.dloss_lambda > 0: 
                     depth_mask = (depth>0).detach()
                     nearDepthMean_map = nearMean_map(depth.squeeze(), (self.canny_mask*depth_mask).squeeze(), kernelsize=3)
-                    canny_loss = l2_loss(nearDepthMean_map, depth*depth_mask) * 1.0
-                    #loss = loss + canny_loss #*1000
+                    canny_loss = l2_loss(nearDepthMean_map, depth*depth_mask) * 1000.0
+                    loss = loss + canny_loss
+                    self.losses_data["canny"].append(f"{canny_loss.item():.4f}")
 
 
             ### novel view (manual batch)
@@ -359,7 +350,7 @@ class GUI:
             if self.step >= self.opt.density_start_iter and self.step <= self.opt.density_end_iter:
                 viewspace_point_tensor, visibility_filter, radii = out["viewspace_points"], out["visibility_filter"], out["radii"]
                 self.renderer.gaussians.max_radii2D[visibility_filter] = torch.max(self.renderer.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                self.renderer.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+                self.renderer.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter) #this breaks if no sds is used D:
 
                 if self.step % self.opt.densification_interval == 0:
                     self.renderer.gaussians.densify_and_prune(self.opt.densify_grad_threshold, min_opacity=0.01, extent=4, max_screen_size=1)
@@ -397,6 +388,11 @@ class GUI:
         ender = torch.cuda.Event(enable_timing=True)
         starter.record()
 
+        if self.breakk == True:
+            self.breakk = False
+            self.save_model(mode='geo+tex')
+            #self.compute_metrics()
+
         # should update image
         if self.need_update:
             # render image
@@ -415,9 +411,10 @@ class GUI:
 
             buffer_image = out[self.mode]  # [3, H, W]
 
-            if self.mode in ['depth', 'alpha']:
+            if self.mode in ['depth', 'alpha', "depth_2"]:
+                if self.mode == 'depth': buffer_image = buffer_image.squeeze(0)
                 buffer_image = buffer_image.repeat(3, 1, 1)
-                if self.mode == 'depth':
+                if self.mode == 'depth' or self.mode == "depth_2":
                     buffer_image = (buffer_image - buffer_image.min()) / (buffer_image.max() - buffer_image.min() + 1e-20)
 
             buffer_image = F.interpolate(
@@ -473,9 +470,9 @@ class GUI:
 
         buffer_image = out[self.mode]  # [3, H, W]
 
-        if self.mode in ['depth', 'alpha']:
+        if self.mode in ['depth', 'alpha', "depth_2"]:
             buffer_image = buffer_image.repeat(3, 1, 1)
-            if self.mode == 'depth':
+            if self.mode == 'depth' or self.mode == "depth_2":
                 buffer_image = (buffer_image - buffer_image.min()) / (buffer_image.max() - buffer_image.min() + 1e-20)
 
         buffer_image = F.interpolate(
@@ -497,15 +494,54 @@ class GUI:
         return buffer_image
     
 
-    def render_multiple_images(self):
+    def render_multiple_images(self, save_path ):
         
+        save_path = save_path +'/renders'
+        os.makedirs(save_path, exist_ok=True)
+
         for cam_pose in self.saved_cameras:
             img = self.render_img(cam_pose)
-            files = os.listdir("./saved_renders")
+            files = os.listdir(save_path)
             next_number = len(files) + 1
             img = (img * 255).astype(np.uint8)
             img = img[..., ::-1].copy() #bgr to rgb
-            cv2.imwrite(f'./saved_renders/camera_pose{next_number}.png', img)
+            cv2.imwrite(f'{save_path}/camera_pose{next_number}.png', img)
+
+    def compute_metrics(self):
+        
+        '''
+        camera_values = self.saved_cameras[0]
+
+        cur_cam = MiniCam(
+            np.array(camera_values['pose'], dtype= np.float32),
+            self.W,
+            self.H,
+            np.float64(camera_values['fovy']),
+            np.float64(camera_values["fovx"]),
+            np.float64(camera_values["near"]),
+            np.float64(camera_values["far"]),
+        )
+        '''
+        pose = orbit_camera(self.opt.elevation, 0, self.opt.radius)
+        fixed_cam = MiniCam(
+            pose,
+            self.input_img.shape[0],
+            self.input_img.shape[1],
+            self.cam.fovy,
+            self.cam.fovx,
+            self.cam.near,
+            self.cam.far,
+        )
+        out = self.renderer.render(fixed_cam, self.gaussain_scale_factor)
+
+        image = out[self.mode]  # [3, H, W]
+
+        input_img_torch = torch.from_numpy(self.input_img).permute(2, 0, 1).to(self.device)
+        #input_img_torch = F.interpolate(self.input_img_torch, (self.opt.ref_size, self.opt.ref_size), mode="bilinear", align_corners=False)
+        psnr_test = psnr(image, input_img_torch ).mean().item()
+        ssim_test = ssim(image, input_img_torch).mean().item()
+        lpips_test = lpips(image, input_img_torch).mean().item()
+        print([psnr_test, ssim_test, lpips_test])
 
     def predict_depth_Zoe(self, img):
         from ZoeDepth.zoedepth.utils.misc import colorize
@@ -588,21 +624,15 @@ class GUI:
         # bgr to rgb
         self.input_img = self.input_img[..., ::-1].copy()
 
-        '''
-        ##########
-        self.input_img_torch = torch.from_numpy(self.input_img).permute(2, 0, 1).unsqueeze(0).to(self.device)
-        self.input_img_torch = F.interpolate(self.input_img_torch, (self.opt.ref_size, self.opt.ref_size), mode="bilinear", align_corners=False)
-
-        #we need tensor
-        self.canny_mask = self.input_img_torch.clamp(0.0, 1.0).to(self.device).squeeze().squeeze()
-        self.canny_mask = image2canny(self.canny_mask.permute(1,2,0), 50, 150, isEdge1=False).detach().to(self.device)
-        print("we end up here", self.canny_mask)
-        ###########
-        '''
+       
         #depht used 
         self.original_depth = depth_zoe
         self.input_og_depth_torch = torch.from_numpy(depth_zoe).unsqueeze(0).unsqueeze(0).to(self.device)
+        if (self.input_og_depth_torch.max() > 1):
+            self.input_og_depth_torch = torch.clamp(self.input_og_depth_torch - 1, min=0)
+
         self.input_og_depth_torch = F.interpolate(self.input_og_depth_torch, (self.opt.ref_size, self.opt.ref_size), mode="bilinear", align_corners=False)
+        self.input_og_depth_torch = normalize_depth5(self.input_og_depth_torch)
 
         # Save the processed image
         # Ensure image is converted back to 8-bit per channel for saving
@@ -618,6 +648,10 @@ class GUI:
     @torch.no_grad()
     def save_model(self, mode='geo', texture_size=1024):
         os.makedirs(self.opt.outdir, exist_ok=True)
+        original_stdout = sys.stdout
+        # Reconfigure sys.stdout to use UTF-8 encoding
+        sys.stdout = io.TextIOWrapper(original_stdout.buffer, encoding='utf-8')
+
         if mode == 'geo':
             path = os.path.join(self.opt.outdir, self.opt.save_path + '_mesh.ply')
             mesh = self.renderer.gaussians.extract_mesh(path, self.opt.density_thresh)
@@ -945,8 +979,9 @@ class GUI:
                         if self.training:
                             self.training = False
                             dpg.configure_item("_button_train", label="start")
-                            with open('./metrics_data/losses_data_v300.json', 'w') as f:
+                            with open('./metrics_data/losses_depth_map_fixed.json', 'w') as f:
                                 json.dump(self.losses_data, f)
+                            print("result saved at: ","./metrics_data/losses_depth_map_fixed.json" )
                         else:
                             self.prepare_train()
                             self.training = True
@@ -975,7 +1010,7 @@ class GUI:
                     self.need_update = True
 
                 dpg.add_combo(
-                    ("image", "depth", "alpha"),
+                    ("image", "depth", "alpha", "depth_2"),
                     label="mode",
                     default_value=self.mode,
                     callback=callback_change_mode,
@@ -1033,7 +1068,10 @@ class GUI:
                         label="Save camera pose", tag="scp", callback=callback_campera_pose
                     )
                 dpg.add_button(
-                        label="Render views!", tag="rvs", callback=self.render_multiple_images
+                        label="Render views!", tag="rvs", callback=self.render_multiple_images("./saved_renders")
+                )
+                dpg.add_button(
+                        label="Compute metrics!", tag="cm", callback=self.compute_metrics
                 )
 
         ### register camera handler
@@ -1136,11 +1174,19 @@ class GUI:
             self.prepare_train()
             for i in tqdm.trange(iters):
                 self.train_step()
+            with open(self.opt.outdir+'/losses.json', 'w') as f:
+                json.dump(self.losses_data, f)
+            print("Json saveda at:", self.opt.outdir+'/losses.json')
             # do a last prune
             self.renderer.gaussians.prune(min_opacity=0.01, extent=1, max_screen_size=1)
         # save
+        self.render_multiple_images(self.opt.outdir)
         self.save_model(mode='model')
+        self.compute_metrics()
         self.save_model(mode='geo+tex')
+        #Print metrics
+        self.compute_metrics()
+        #self.compute_metrics()
         
 
 if __name__ == "__main__":
