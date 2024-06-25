@@ -22,6 +22,8 @@ import sys
 import io
 
 from depth_utils  import lpips, psnr, ssim, normalize_depth, normalize_depth5, l1_loss, l2_loss, nearMean_map, image2canny, optimize_depth, export_depth_image, normalize_depth_map, clean_background, save_tensor_as_png, save_tensor_as_png2, load_camera_poses
+from stable_diffusion_pipeline import StableDiffusionPipeline
+
 
 class GUI:
     def __init__(self, opt):
@@ -68,6 +70,9 @@ class GUI:
         self.input_image_rgba = None
         self.losses_data = {"rgb": [], "alpha": [], "depth": [], "canny":[]}
         self.breakk = False
+
+        #Text-to-Image
+        self.text_to_img = None
 
         self.saved_cameras = load_camera_poses("./camera_poses")
 
@@ -185,7 +190,30 @@ class GUI:
             print(f"[INFO] loaded zero123!")
 
         # input image
-        if self.input_img is not None:
+        if self.input_img is not None or self.opt.text_to_img:
+
+            if self.opt.text_to_img:
+                #infer image with stable diffusion
+                self.sd_pipeline = StableDiffusionPipeline()
+                #prompt = "A simple 3d render of an entirely fully visible dinosaur with a funny hat"
+                self.input_img = self.sd_pipeline.generate_image(self.opt.prompt)
+
+                if self.bg_remover is None:
+                    self.bg_remover = rembg.new_session()
+                    self.input_img = rembg.remove(self.input_img, session=self.bg_remover)
+                    self.input_img = np.array(self.input_img)
+                    #self.input_img = np.array(self.input_img).astype(np.float32)
+
+                    self.input_img = cv2.resize(self.input_img, (self.W, self.H), interpolation=cv2.INTER_AREA)                
+                    self.input_img = self.input_img.astype(np.float32) / 255.0
+                    self.input_image_rgba = self.input_img.copy()
+                    self.input_mask = self.input_img[..., 3:]
+                    # white bg
+                    self.input_img = self.input_img[..., :3] * self.input_mask + (1 - self.input_mask)
+
+                    #self.input_img = self.input_img.float()
+                               
+
             self.input_img_torch = torch.from_numpy(self.input_img).permute(2, 0, 1).unsqueeze(0).to(self.device)
             self.input_img_torch = F.interpolate(self.input_img_torch, (self.opt.ref_size, self.opt.ref_size), mode="bilinear", align_corners=False)
 
@@ -554,7 +582,7 @@ class GUI:
         #depth_pred = (depth_pred * 255).astype(np.uint8)
         #depth_pred = depth_pred[..., ::-1].copy() #bgr to rgb
         clean_img = clean_background(self.input_image_rgba, depth_pred)
-        cv2.imwrite("./clean_image.png", clean_img)
+        #cv2.imwrite("./clean_image.png", clean_img)
         return clean_img
         ''' 
         # Colorize output
@@ -617,7 +645,7 @@ class GUI:
         # white bg
         self.input_img = img[..., :3] * self.input_mask + (1 - self.input_mask)
 
-
+        
         print("[Info] we're reaching img save point")
         depth_zoe = self.predict_depth_Zoe(self.input_img)
         

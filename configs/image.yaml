@@ -9,7 +9,7 @@ mesh:
 # estimated elevation angle for input image 
 elevation: 0
 # reference image resolution
-ref_size: 1024
+ref_size: 256
 # density thresh for mesh extraction
 density_thresh: 1
 
