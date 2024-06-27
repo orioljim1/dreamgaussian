@@ -297,11 +297,11 @@ class GUI:
                     loss = loss + deploss
 
                 ## depth regularization loss (canny)
-                usedepthReg = False
-                if usedepthReg and self.step>=0 and self.opt.dloss_lambda > 0: 
+                usedepthReg = True
+                if usedepthReg and self.step>=0 and self.opt.canny_lambda > 0: 
                     depth_mask = (depth>0).detach()
                     nearDepthMean_map = nearMean_map(depth.squeeze(), (self.canny_mask*depth_mask).squeeze(), kernelsize=3)
-                    canny_loss = l2_loss(nearDepthMean_map, depth*depth_mask) * 1000.0
+                    canny_loss = self.opt.canny_lambda * l2_loss(nearDepthMean_map, depth*depth_mask) * 1000.0
                     loss = loss + canny_loss
                     self.losses_data["canny"].append(f"{canny_loss.item():.4f}")
 

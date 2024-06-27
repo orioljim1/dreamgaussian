@@ -12,7 +12,6 @@ import json
 from modules.lpips import LPIPS
 
 def normalize_depth(depth):
-    a= 2
     return (depth-depth.min())/(depth.max()-depth.min())
 
 

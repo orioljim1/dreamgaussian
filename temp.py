@@ -1,48 +1,36 @@
-import torch
 
-if torch.cuda.is_available():
-    device = torch.device("cuda")
-    a = torch.tensor([1.0, 2.0], device=device)
-    print(a)
-else:
-    print("CUDA is not available")
+import cv2
+import numpy as np
 
+def normalize_depth(depth):
+    return (depth-depth.min())/(depth.max()-depth.min())
 
-def latents_to_png(self, latents):
-    decoded_latent = self.decode_latents(latents)
-    decoded_latent = decoded_latent.squeeze()
-    decoded_latent = decoded_latent.permute(1,2,0) #[H,W,C]
-    return decoded_latent
-
-from PIL import Image
-def save_tensor_as_png(tensor, filename):
-    """
-    Saves a tensor of shape [H, W, C] where C=3 (for RGB images) to a PNG file.
+def clean_background(rgba_image, rgb_image):
     
-    Args:
-    tensor (torch.Tensor): Input tensor with shape [256, 256, 3].
-    filename (str): Path to save the PNG image.
-    
-    Returns:
-    None
-    """
-    
-    tensor = tensor.squeeze()
-    tensor = tensor.permute(1,2,0)
+   
 
-    # Ensure the tensor is on CPU and convert to PIL image
-    if tensor.is_cuda:
-        tensor = tensor.cpu()  # Move tensor to CPU if it's on GPU
+    #rgba_image = cv2.imread(rgba_image)
+    rgba_image = cv2.imread(rgba_image, cv2.IMREAD_UNCHANGED)
+    rgb_image = cv2.imread(rgb_image)
 
-    # Normalize the tensor to 0-255 and convert to 'uint8'
-    if tensor.max() <= 1.0:
-        tensor = tensor.mul(255).byte()  # Scale to 0-255 if max is 1.0 or less
-    elif tensor.dtype != torch.uint8:
-        tensor = tensor.byte()  # Convert to uint8 if not already
-    
-    # Convert to PIL Image (assuming tensor is in HWC format and 'uint8')
-    image = Image.fromarray(tensor.numpy())
-    
-    # Save the image as a PNG file
-    image.save(filename, 'PNG')
-    print(f'Image saved as {filename}')
+    height, width, _ = rgba_image.shape
+    #rgb_image_corrected = (rgb_image * 255).astype(np.uint8)
+
+    #cv2.imwrite("./rgba_image_OGI.png", rgba_image_corrected)
+    #cv2.imwrite("./rgb_image_pre_DMM.png", rgb_image_corrected)
+
+    # Iterate over all pixels
+    for y in range(height):
+        for x in range(width):
+            r, g, b, a = rgba_image[y, x]  # Extract RGBA values
+            # Set RGB to black if alpha is 0
+            if a == 0:
+                rgb_image[y, x] = 0 # Set RGB pixel to black
+    rgb_image_normalized = normalize_depth(rgb_image)
+    rgb_image_normalized = (rgb_image_normalized * 255).astype(np.uint8)
+
+
+    cv2.imwrite("./epth_teddy.png", rgb_image_normalized)
+    return rgb_image    
+
+clean_background("./clean.png","./teddy_bear_d.png")
