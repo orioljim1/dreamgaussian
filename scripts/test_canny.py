@@ -54,12 +54,22 @@ out_dir = args.out
 os.makedirs(out_dir, exist_ok=True)
 
 
-results_dict = {}
+
+def read_json_file(file_path):
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as file:
+            return json.load(file)
+    else:
+        return {}
+results_dict = read_json_file(out_dir+'/Results.json')
 for file in files:
     name = os.path.basename(file).replace("_rgba.png", "")
 
-    results_dict[name] = {}
+    #results_dict[name] = {}
+    
     out_dir_file = out_dir + f'/{name}'
+    if name not in results_dict:
+        results_dict[name] = read_json_file(out_dir_file+'/image_generation_results.json')
     os.makedirs(out_dir_file, exist_ok=True)
 
     for lambda_i in lambda_to_test:
@@ -102,8 +112,8 @@ for file in files:
             json.dump(scores, f)
 
         results_dict[name][lambda_i] = scores
-    with open(out_dir_file+'/image_generation_results.json', 'w') as f:
-                json.dump(results_dict[name], f)
+        with open(out_dir_file+'/image_generation_results.json', 'w') as f:
+                    json.dump(results_dict[name], f)
     
 with open(out_dir+'/Results.json', 'w') as f:
                 json.dump(results_dict, f)
